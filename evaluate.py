@@ -14,17 +14,20 @@ import time
 
 import tensorflow as tf
 import numpy as np
+import utils.ImageUtil as ImageUtil
+from deeplab_resnet import DeepLabResNetModel, ImageReader, prepare_label, inv_preprocess, decode_labels
 
-from deeplab_resnet import DeepLabResNetModel, ImageReader, prepare_label
-
-IMG_MEAN = np.array((104.00698793,116.66876762,122.67891434), dtype=np.float32)
+IMG_MEAN = np.array((104.00698793, 116.66876762, 122.67891434), dtype=np.float32)
 
 DATA_DIRECTORY = '/home/VOCdevkit'
 DATA_LIST_PATH = './dataset/val.txt'
 IGNORE_LABEL = 255
 NUM_CLASSES = 21
-NUM_STEPS = 1449 # Number of images in the validation set.
+NUM_STEPS = 1449  # Number of images in the validation set.
 RESTORE_FROM = './deeplab_resnet.ckpt'
+SNAPSHOT_DIR = './snapshots/'
+SAVE_NUM_IMAGES = 1
+
 
 def get_arguments():
     """Parse all the arguments provided from the CLI.
@@ -47,6 +50,7 @@ def get_arguments():
                         help="Where restore model parameters from.")
     return parser.parse_args()
 
+
 def load(saver, sess, ckpt_path):
     '''Load trained weights.
     
@@ -54,74 +58,92 @@ def load(saver, sess, ckpt_path):
       saver: TensorFlow saver object.
       sess: TensorFlow session.
       ckpt_path: path to checkpoint file with parameters.
-    ''' 
+    '''
     saver.restore(sess, ckpt_path)
     print("Restored model parameters from {}".format(ckpt_path))
+
 
 def main():
     """Create the model and start the evaluation process."""
     args = get_arguments()
-    
+
     # Create queue coordinator.
     coord = tf.train.Coordinator()
-    
+
     # Load reader.
     with tf.name_scope("create_inputs"):
         reader = ImageReader(
             args.data_dir,
             args.data_list,
-            None, # No defined input size.
-            False, # No random scale.
-            False, # No random mirror.
+            None,  # No defined input size.
+            False,  # No random scale.
+            False,  # No random mirror.
             args.ignore_label,
             IMG_MEAN,
             coord)
         image, label = reader.image, reader.label
-    image_batch, label_batch = tf.expand_dims(image, dim=0), tf.expand_dims(label, dim=0) # Add one batch dimension.
+    image_batch, label_batch = tf.expand_dims(image, dim=0), tf.expand_dims(label, dim=0)  # Add one batch dimension.
 
     # Create network.
     net = DeepLabResNetModel({'data': image_batch}, is_training=False, num_classes=args.num_classes)
 
     # Which variables to load.
     restore_var = tf.global_variables()
-    
+
     # Predictions.
-    raw_output = net.layers['fc1_voc12']
-    raw_output = tf.image.resize_bilinear(raw_output, tf.shape(image_batch)[1:3,])
-    raw_output = tf.argmax(raw_output, dimension=3)
-    pred = tf.expand_dims(raw_output, dim=3) # Create 4-d tensor.
-    
+    raw_output1 = net.layers['fc1_voc12']
+    raw_output2 = tf.image.resize_bilinear(raw_output1, tf.shape(image_batch)[1:3, ])
+    raw_output = tf.argmax(raw_output2, dimension=3)
+    pred_4d = tf.expand_dims(raw_output, dim=3)  # Create 4-d tensor.
+    # save_op = tf.py_func(ImageUtil.helloWorld, ['test text'], tf.bool)
+
+    images_summary = tf.py_func(inv_preprocess, [image_batch, SAVE_NUM_IMAGES, IMG_MEAN], tf.uint8)
+    labels_summary = tf.py_func(decode_labels, [label_batch, SAVE_NUM_IMAGES, args.num_classes], tf.uint8)
+    preds_summary = tf.py_func(decode_labels, [pred_4d, SAVE_NUM_IMAGES, args.num_classes], tf.uint8)
+
+    total_summary = tf.summary.image('images',
+                                     tf.concat(axis=2, values=[images_summary, labels_summary, preds_summary]),
+                                     max_outputs=SAVE_NUM_IMAGES)  # Concatenate row-wise.
+    summary_writer = tf.summary.FileWriter(SNAPSHOT_DIR,
+                                           graph=tf.get_default_graph())
+
     # mIoU
-    pred = tf.reshape(pred, [-1,])
-    gt = tf.reshape(label_batch, [-1,])
-    weights = tf.cast(tf.less_equal(gt, args.num_classes - 1), tf.int32) # Ignoring all labels greater than or equal to n_classes.
+    pred = tf.reshape(pred_4d, [-1, ])
+    gt = tf.reshape(label_batch, [-1, ])
+    weights = tf.cast(tf.less_equal(gt, args.num_classes - 1),
+                      tf.int32)  # Ignoring all labels greater than or equal to n_classes.
     mIoU, update_op = tf.contrib.metrics.streaming_mean_iou(pred, gt, num_classes=args.num_classes, weights=weights)
-    
+
     # Set up tf session and initialize variables. 
     config = tf.ConfigProto()
     config.gpu_options.allow_growth = True
     sess = tf.Session(config=config)
     init = tf.global_variables_initializer()
-    
+
     sess.run(init)
     sess.run(tf.local_variables_initializer())
-    
+
     # Load weights.
     loader = tf.train.Saver(var_list=restore_var)
     if args.restore_from is not None:
         load(loader, sess, args.restore_from)
-    
+
     # Start queue threads.
     threads = tf.train.start_queue_runners(coord=coord, sess=sess)
-    
+
     # Iterate over training steps.
     for step in range(args.num_steps):
-        preds, _ = sess.run([pred, update_op])
+        preds, _, summary, _ = sess.run([pred, update_op, total_summary])
+        summary_writer.add_summary(summary, step)
+
+
+        # print progress
         if step % 100 == 0:
             print('step {:d}'.format(step))
     print('Mean IoU: {:.3f}'.format(mIoU.eval(session=sess)))
     coord.request_stop()
     coord.join(threads)
-    
+
+
 if __name__ == '__main__':
     main()
