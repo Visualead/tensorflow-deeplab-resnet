@@ -1,0 +1,5 @@
+.idea
+dataset/VOCdevkit/**
+snapshots/**
+*.pyc
+*.ckpt
