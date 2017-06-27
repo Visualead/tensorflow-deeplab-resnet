@@ -112,8 +112,8 @@ def read_images_from_disk(input_queue, input_size, random_scale, random_mirror, 
     img_contents = tf.read_file(input_queue[0])
     label_contents = tf.read_file(input_queue[1])
     
-    img = tf.image.decode_jpeg(img_contents, channels=3)
-    img_r, img_g, img_b = tf.split(axis=2, num_or_size_splits=3, value=img)
+    decoded_img = tf.image.decode_jpeg(img_contents, channels=3)
+    img_r, img_g, img_b = tf.split(axis=2, num_or_size_splits=3, value=decoded_img)
     img = tf.cast(tf.concat(axis=2, values=[img_b, img_g, img_r]), dtype=tf.float32)
     # Extract mean.
     img -= img_mean
@@ -134,7 +134,7 @@ def read_images_from_disk(input_queue, input_size, random_scale, random_mirror, 
         # Randomly crops the images and labels.
         img, label = random_crop_and_pad_image_and_labels(img, label, h, w, ignore_label)
 
-    return img, label
+    return img, label, decoded_img
 
 class ImageReader(object):
     '''Generic ImageReader which reads images and corresponding segmentation
@@ -165,7 +165,7 @@ class ImageReader(object):
         self.labels = tf.convert_to_tensor(self.label_list, dtype=tf.string)
         self.queue = tf.train.slice_input_producer([self.images, self.labels],
                                                    shuffle=input_size is not None) # not shuffling if it is val
-        self.image, self.label = read_images_from_disk(self.queue, self.input_size, random_scale, random_mirror, ignore_label, img_mean) 
+        self.image, self.label, self.decoded_img = read_images_from_disk(self.queue, self.input_size, random_scale, random_mirror, ignore_label, img_mean)
 
     def dequeue(self, num_elements):
         '''Pack images and labels into a batch.
